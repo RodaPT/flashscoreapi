@@ -1,0 +1,5 @@
+service-account.json
+*.log
+*.log.save
+*.log.save.1
+
