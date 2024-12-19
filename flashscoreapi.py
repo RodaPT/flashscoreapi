@@ -141,7 +141,8 @@ def main():
     urls = [
         "https://pt.besoccer.com/time/jogos/sporting-lisbon",
         "https://pt.besoccer.com/time/jogos/uniao-leiria",
-        "https://pt.besoccer.com/time/jogos/seleccion-portugal"
+        "https://pt.besoccer.com/time/jogos/seleccion-portugal",
+        "https://pt.besoccer.com/time/jogos/manchester-united-fc"
     ]
 
     # Scrape upcoming match information
