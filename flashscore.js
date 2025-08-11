@@ -15,50 +15,71 @@ async function scrapeMatches(urls) {
         console.log(`Fetching URL: ${url}`);
         await page.goto(url);
 
-        // Wait for the match data to load
+        // Wait for the main match table wrapper to load (ensures the page is ready)
         try {
-            console.log('Waiting for match data to load...');
-            await page.waitForSelector('.event__match', { visible: true, timeout: 60000 }); // Waiting for match data to appear
-            console.log('Match data loaded successfully!');
+            console.log('Waiting for main match table wrapper to load...');
+            await page.waitForSelector('.container__livetable', { visible: true, timeout: 60000 });
+            console.log('Main match table wrapper loaded successfully!');
         } catch (error) {
-            console.error(`Error waiting for selector on ${url}:`, error);
+            console.error(`Error waiting for main match table wrapper on ${url}:`, error);
             continue;
         }
 
+        // Use .event__match as the match row selector and extract team names from the correct structure
         const matches = await page.evaluate(() => {
-            console.log('Evaluating page content...');
             const matchElements = document.querySelectorAll('.event__match');
-            console.log(`Found ${matchElements.length} match elements on the page.`);
+            const now = new Date();
+            const currentYear = now.getFullYear();
             return Array.from(matchElements).map(match => {
-                // Extract match ID from the ID attribute of the div
-                const matchId = match.id;
+                // Extract team names from .event__homeParticipant and .event__awayParticipant
+                const team1 = match.querySelector('.event__homeParticipant .wcl-name_jjfMf')?.innerText.trim()
+                    || match.querySelector('.event__homeParticipant [alt]')?.getAttribute('alt')?.trim()
+                    || '';
+                const team2 = match.querySelector('.event__awayParticipant .wcl-name_jjfMf')?.innerText.trim()
+                    || match.querySelector('.event__awayParticipant [alt]')?.getAttribute('alt')?.trim()
+                    || '';
 
-                // Extract team names
-                const team1 = match.querySelector('.event__homeParticipant .wcl-name_3y6f5')?.innerText.trim() || '';
-                const team2 = match.querySelector('.event__awayParticipant .wcl-name_3y6f5')?.innerText.trim() || '';
+                // Extract match time from .event__time
+                const matchTimeRaw = match.querySelector('.event__time')?.innerText.trim() || '';
+                // Format: DD.MM. HH:MM or DD.MM.YYYY HH:MM
+                let datetime = '';
+                if (matchTimeRaw) {
+                    const [date, time] = matchTimeRaw.split(' ');
+                    if (date && time) {
+                        const dateParts = date.split('.').filter(Boolean);
+                        let day, month, year;
+                        if (dateParts.length === 2) {
+                            // Format: DD.MM.
+                            [day, month] = dateParts;
+                            year = currentYear;
+                        } else if (dateParts.length === 3) {
+                            // Format: DD.MM.YYYY
+                            [day, month, year] = dateParts;
+                        }
+                        if (day && month && year) {
+                            // Pad day and month if needed
+                            const pad = n => n.toString().padStart(2, '0');
+                            datetime = `${year}-${pad(month)}-${pad(day)}T${time}:00`;
+                        }
+                    }
+                }
 
-                // Extract match time (from the .event__time class)
-                const matchTime = match.querySelector('.event__time')?.innerText.trim() || '';
-                
-                // Parse the datetime manually
-                const [date, time] = matchTime.split(' ');  // Split date and time
-                const [day, month] = date.split('.');  // Split day and month
-
-                // Get the current year to construct the full date
-                const currentYear = new Date().getFullYear();
-                const matchDate = new Date(`${currentYear}-${month}-${day}T${time}:00`);
-
-                const matchLink = match.querySelector('.eventRowLink')?.href || ''; // Extract match link
-
-                console.log(`Scraping match: ${matchId}, ${team1} vs ${team2}, Date: ${matchTime}, Time: ${matchDate.toISOString()}`);
+                // Extract match ID and construct match link
+                const matchIdAttr = match.getAttribute('id');
+                let matchId = matchIdAttr || `${team1}_vs_${team2}_${datetime}`;
+                let matchLink = '';
+                if (matchIdAttr && matchIdAttr.startsWith('g_1_')) {
+                    const matchIdPart = matchIdAttr.replace('g_1_', '');
+                    matchLink = `https://www.flashscore.pt/jogo/${matchIdPart}/`;
+                }
 
                 return {
                     matchId,
                     team1,
                     team2,
-                    datetime: matchDate.toISOString(),
+                    datetime,
                     matchLink,
-                    matchTime,  // Adding the match time as well
+                    matchTime: matchTimeRaw,
                 };
             });
         });
@@ -117,7 +138,7 @@ async function deleteAllEvents(service, calendarId) {
 
 // Function to add events to Google Calendar
 async function addEventsToCalendar(upcomingMatches) {
-    const eventIds = loadEventIds();
+    let eventIds = loadEventIds();
     const calendarId = '870d419d0d043e060fe24a8560fa7dbc119712122d907ad7867f8fd41d5beff2@group.calendar.google.com';
 
     // Initialize Google API client with service account credentials
@@ -128,15 +149,45 @@ async function addEventsToCalendar(upcomingMatches) {
 
     const service = google.calendar({ version: 'v3', auth });
 
-    // Uncomment to delete all events
-    // Delete all existing events
-    console.log('Deleting all existing events...');
-    await deleteAllEvents(service, calendarId);
+    // Build a map of matchLink to match for quick lookup
+    const matchMap = new Map(upcomingMatches.map(m => [m.matchLink, m]));
+    const now = new Date();
 
-    // Add new events
+    // Remove events from calendar and eventIds that are no longer present or are in the past
+    for (const [matchLink, eventId] of Object.entries(eventIds)) {
+        const match = matchMap.get(matchLink);
+        let shouldDelete = false;
+        if (!match) {
+            // Not present in new matches
+            shouldDelete = true;
+        } else if (match.datetime && !isNaN(new Date(match.datetime).getTime())) {
+            // If match is in the past
+            const matchDate = new Date(match.datetime);
+            if (matchDate < now) {
+                shouldDelete = true;
+            }
+        }
+        if (shouldDelete) {
+            try {
+                await service.events.delete({ calendarId, eventId });
+                console.log(`Deleted event (no longer present or in the past): ${eventId}`);
+            } catch (error) {
+                console.error(`Error deleting event: ${error}`);
+            }
+            delete eventIds[matchLink];
+        }
+    }
+
+    // Add or update events
     for (const match of upcomingMatches) {
         console.log(`Processing match: ${match.team1} vs ${match.team2} at ${match.datetime}`);
         console.log(`Match Link: ${match.matchLink}`);
+
+        // Skip if datetime is invalid or empty
+        if (!match.datetime || isNaN(new Date(match.datetime).getTime())) {
+            console.warn(`Skipping match with invalid datetime: ${match.team1} vs ${match.team2} (${match.matchTime})`);
+            continue;
+        }
 
         const event = {
             summary: `${match.team1} vs ${match.team2}`,
@@ -150,15 +201,30 @@ async function addEventsToCalendar(upcomingMatches) {
             },
         };
 
-        try {
-            const eventResult = await service.events.insert({
-                calendarId: calendarId,
-                requestBody: event,
-            });
-            eventIds[match.matchLink] = eventResult.data.id;
-            console.log(`Created event: ${eventResult.data.id}`);
-        } catch (error) {
-            console.error(`Error creating event: ${error}`);
+        if (eventIds[match.matchLink]) {
+            // Update existing event
+            try {
+                await service.events.update({
+                    calendarId,
+                    eventId: eventIds[match.matchLink],
+                    requestBody: event,
+                });
+                console.log(`Updated event: ${eventIds[match.matchLink]}`);
+            } catch (error) {
+                console.error(`Error updating event: ${error}`);
+            }
+        } else {
+            // Create new event
+            try {
+                const eventResult = await service.events.insert({
+                    calendarId: calendarId,
+                    requestBody: event,
+                });
+                eventIds[match.matchLink] = eventResult.data.id;
+                console.log(`Created event: ${eventResult.data.id}`);
+            } catch (error) {
+                console.error(`Error creating event: ${error}`);
+            }
         }
     }
 
