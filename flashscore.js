@@ -152,6 +152,30 @@ function loadEventIds() {
     return {};
 }
 
+// Function to load event metadata (missing counts etc.)
+function loadEventMeta() {
+    const filePath = path.join(__dirname, 'event_meta.json');
+    if (fs.existsSync(filePath)) {
+        console.log('Loading event metadata...');
+        try {
+            return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        } catch (e) {
+            console.error('Error parsing event_meta.json, resetting metadata.', e);
+            return {};
+        }
+    }
+    console.log('No event metadata found, creating a new file.');
+    return {};
+}
+
+// Function to save event metadata
+function saveEventMeta(meta) {
+    const filePath = path.join(__dirname, 'event_meta.json');
+    console.log('Saving event metadata to file...');
+    fs.writeFileSync(filePath, JSON.stringify(meta, null, 2), 'utf-8');
+    console.log('Event metadata saved successfully.');
+}
+
 // Function to save event IDs to file
 function saveEventIds(eventIds) {
     const filePath = path.join(__dirname, 'event_ids.json');
@@ -201,30 +225,57 @@ async function addEventsToCalendar(upcomingMatches) {
     const matchMap = new Map(upcomingMatches.map(m => [m.matchLink, m]));
     const now = new Date();
 
-    // Remove events from calendar and eventIds that are no longer present or are in the past
+    // Load metadata and initialize missingCounts if needed
+    const meta = loadEventMeta();
+    meta.missingCounts = meta.missingCounts || {};
+    const MISSING_THRESHOLD = 3; // number of consecutive runs a match must be missing before deletion
+
+    // Update missingCounts for each tracked event and delete only when threshold reached
     for (const [matchLink, eventId] of Object.entries(eventIds)) {
         const match = matchMap.get(matchLink);
-        let shouldDelete = false;
-        if (!match) {
-            // Not present in new matches
-            shouldDelete = true;
-        } else if (match.datetime && !isNaN(new Date(match.datetime).getTime())) {
-            // If match is in the past
+
+        // If we have a match and it has a datetime in the past, delete immediately
+        if (match && match.datetime && !isNaN(new Date(match.datetime).getTime())) {
             const matchDate = new Date(match.datetime);
             if (matchDate < now) {
-                shouldDelete = true;
+                try {
+                    await service.events.delete({ calendarId, eventId });
+                    console.log(`Deleted event (match in the past): ${eventId}`);
+                } catch (error) {
+                    console.error(`Error deleting event: ${error}`);
+                }
+                delete eventIds[matchLink];
+                delete meta.missingCounts[matchLink];
+                continue;
             }
         }
-        if (shouldDelete) {
-            try {
-                await service.events.delete({ calendarId, eventId });
-                console.log(`Deleted event (no longer present or in the past): ${eventId}`);
-            } catch (error) {
-                console.error(`Error deleting event: ${error}`);
+
+        if (!match) {
+            // Increment missing count
+            meta.missingCounts[matchLink] = (meta.missingCounts[matchLink] || 0) + 1;
+            console.log(`Match ${matchLink} missing this run (count=${meta.missingCounts[matchLink]})`);
+            if (meta.missingCounts[matchLink] >= MISSING_THRESHOLD) {
+                // delete the event
+                try {
+                    await service.events.delete({ calendarId, eventId });
+                    console.log(`Deleted event (missing ${MISSING_THRESHOLD} runs): ${eventId}`);
+                } catch (error) {
+                    console.error(`Error deleting event: ${error}`);
+                }
+                delete eventIds[matchLink];
+                delete meta.missingCounts[matchLink];
             }
-            delete eventIds[matchLink];
+        } else {
+            // match is present, reset missing count
+            if (meta.missingCounts[matchLink]) {
+                console.log(`Match ${matchLink} reappeared; resetting missing count.`);
+                delete meta.missingCounts[matchLink];
+            }
         }
     }
+
+    // Save metadata after deletion phase
+    saveEventMeta(meta);
 
     // Add or update events
     for (const match of upcomingMatches) {
