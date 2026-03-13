@@ -30,7 +30,7 @@ async function scrapeMatches(urls) {
             const matchElements = document.querySelectorAll('.event__match');
             const now = new Date();
             const currentYear = now.getFullYear();
-            return Array.from(matchElements).map(match => {
+            return Array.from(matchElements).map((match, idx) => {
                 // Extract team names from .event__homeParticipant and .event__awayParticipant
                 // Try several selectors and fallbacks to extract team names (site HTML can change)
                 let team1 = match.querySelector('.event__homeParticipant .wcl-name_jjfMf')?.innerText.trim()
@@ -337,7 +337,6 @@ async function main() {
     const urls = [
         "https://www.flashscore.pt/equipa/sporting-cp/tljXuHBC/lista/",
         "https://www.flashscore.pt/equipa/leiria/AceEgPi5/lista/",
-        "https://www.flashscore.pt/equipa/manchester-utd/ppjDR086/lista/",
         "https://www.flashscore.pt/equipa/portugal/WvJrjFVN/lista/"
     ];
 
