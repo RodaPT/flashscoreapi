@@ -2,4 +2,6 @@ service-account.json
 *.log
 *.log.save
 *.log.save.1
+event_ids.json
+event_meta.json
 /venv
