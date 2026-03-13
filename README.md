@@ -16,6 +16,7 @@ It is designed to:
 - npm (or yarn)
 - A Google Cloud project with the Google Calendar API enabled
 - A Google Calendar you can edit (the script uses a service account)
+- (Optional) A Raspberry Pi or similar always-on device is great for running this as a scheduled task
 
 ---
 
@@ -113,7 +114,3 @@ If you want to schedule it, add a cron job like this (every 4 hours):
 - If the script fails with auth errors:
   - Ensure the service account is shared on the calendar with edit access.
   - Ensure `service-account.json` is valid and in the project root.
-
----
-
-If you want, I can also add a `config.js`/`.env` approach to make the calendar ID + URLs reusable without editing the main script.
