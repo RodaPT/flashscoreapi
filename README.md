@@ -49,8 +49,22 @@ npm install
 
 ### 4) Configure the script
 
-- The calendar ID is hard-coded in `flashscore.js` (line with `calendarId = ...`).
-- If you want a different calendar, replace that ID with yours.
+Edit `config.js` to customize:
+- **urls**: Which Flashscore team pages to scrape
+- **calendarId**: Your Google Calendar ID
+- **selectors**: CSS selectors (if website HTML changes)
+- **matchDurationHours**: How long to show events (default: 2 hours)
+- **missingEventThreshold**: Delete events after N consecutive missing runs (default: 3)
+
+Example:
+```javascript
+urls: [
+    'https://www.flashscore.pt/equipa/sporting-cp/tljXuHBC/lista/',
+    'https://www.flashscore.pt/equipa/leiria/AceEgPi5/lista/',
+],
+calendarId: 'your-calendar-id@group.calendar.google.com',
+matchDurationHours: 2,
+```
 
 ### 5) Run the script
 
@@ -92,9 +106,39 @@ If you want to schedule it, add a cron job like this (every 4 hours):
 | File | Purpose |
 |------|---------|
 | `flashscore.js` | Main scraper + calendar sync script |
+| `config.js` | **Centralized configuration** (URLs, calendar ID, selectors, thresholds) |
+| `.env.example` | Template for environment variables (copy to `.env` for local use) |
 | `event_ids.json` | Stores mapping of match link → Google Calendar event ID |
 | `event_meta.json` | Tracks missing counts to avoid deleting on temporary scrape failures |
-| `service-account.json` | Google service account credentials (keep private) |
+| `service-account.json` | Google service account credentials (keep private, auto-ignored) |
+
+---
+
+## 🔄 Recent Improvements (March 2026)
+
+The script has been refactored for better reliability and maintainability:
+
+### Configuration Management
+- ✅ All hardcoded values moved to `config.js`
+- ✅ Easy to update URLs, calendar ID, selectors without touching code
+- ✅ Selector configuration separated for quick updates if HTML changes
+
+### Error Handling & Robustness
+- ✅ Browser guaranteed to close via try-finally (no hung processes)
+- ✅ Per-URL error handling - one failure doesn't stop entire process
+- ✅ Fallback selectors for inconsistent HTML across different team pages
+- ✅ Debug logging to identify selector issues
+
+### Performance & Reliability
+- ✅ Migrated from blocking to async file I/O (`fs.writeFileSync` → `fs.promises`)
+- ✅ Non-blocking operations improve performance
+- ✅ Better error messages with context
+
+### Code Quality
+- ✅ Cleaner, modular code structure
+- ✅ JSDoc comments for all functions
+- ✅ Better logging with emoji indicators (✓ ⚠ ❌)
+- ✅ Separated concerns (scraping, parsing, calendar sync)
 
 ---
 
@@ -107,10 +151,20 @@ If you want to schedule it, add a cron job like this (every 4 hours):
 
 ## ✅ Troubleshooting
 
-- If matches stop appearing:
-  - The site HTML structure may have changed (re-run the script and inspect logs).
-  - Matches without times won’t create calendar events until a time appears.
+### No matches found from some teams
+- The script automatically tries fallback selectors if the primary fails.
+- If still no matches:
+  - Check console output for debug logs (shows selector match counts)
+  - Flashscore may have changed their HTML structure
+  - Update the selectors in `config.js` if needed
 
-- If the script fails with auth errors:
-  - Ensure the service account is shared on the calendar with edit access.
-  - Ensure `service-account.json` is valid and in the project root.
+### Matches stop appearing
+- The site HTML structure may have changed.
+- Run the script manually and check the debug output.
+- Inspect the page with browser DevTools to find new CSS selectors.
+- Update `config.js` selectors section.
+
+### Auth errors
+- Ensure the service account is shared on the calendar with **make changes** access.
+- Ensure `service-account.json` is valid and in the project root.
+- Check that the calendar ID in `config.js` matches your actual calendar ID.
