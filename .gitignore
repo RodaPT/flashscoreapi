@@ -5,3 +5,7 @@ service-account.json
 event_ids.json
 event_meta.json
 /venv
+node_modules/
+.env
+.DS_Store
+
