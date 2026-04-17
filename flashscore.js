@@ -3,6 +3,7 @@ const { google } = require('googleapis');
 const fs = require('fs').promises;
 const fsSync = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { JWT } = require('google-auth-library');
 const CONFIG = require('./config.js');
 
@@ -34,6 +35,25 @@ function parseMatchDateTime(timeString, currentYear) {
 }
 
 /**
+ * Build a stable key for event tracking when match link is missing
+ */
+function buildEventKey(match) {
+    if (match.matchLink) return match.matchLink;
+
+    const rawKey = [
+        match.sourceUrl || '',
+        match.matchId || '',
+        match.team1 || '',
+        match.team2 || '',
+        match.datetime || '',
+        match.matchTime || ''
+    ].join('|');
+
+    const digest = crypto.createHash('sha1').update(rawKey).digest('hex');
+    return `fallback:${digest}`;
+}
+
+/**
  * Scrape matches from provided URLs
  */
 async function scrapeMatches(urls) {
@@ -53,6 +73,16 @@ async function scrapeMatches(urls) {
                     visible: true, 
                     timeout: CONFIG.browser.timeout 
                 });
+
+                // Some pages render rows after the main container is visible.
+                try {
+                    await page.waitForFunction(() => {
+                        return document.querySelectorAll('.event__match, [class*="event__match"], [id^="g_"]').length > 0;
+                    }, { timeout: 15000 });
+                } catch (_) {
+                    // Continue with parsing and rely on fallback extraction/debug info.
+                }
+
                 console.log('Match table loaded successfully!');
             } catch (error) {
                 console.error(`Error loading ${url}:`, error.message);
@@ -60,19 +90,55 @@ async function scrapeMatches(urls) {
             }
 
             try {
-                const matches = await page.evaluate(({ currentYear, matchSelector, homeTeamSelector, awayTeamSelector, timeSelector }) => {
-                    // Try primary selector first, then fallback
-                    let matchElements = document.querySelectorAll(matchSelector);
-                    
-                    if (matchElements.length === 0) {
-                        // Try fallback selector (for pages with different HTML structure)
-                        matchElements = document.querySelectorAll('[id^="g_1_"]');
+                const matches = await page.evaluate(({ currentYear, matchSelector, homeTeamSelector, awayTeamSelector, homeTeamAltSelector, awayTeamAltSelector, timeSelector, sourceUrl }) => {
+                    // Use multiple selectors because Flashscore frequently changes class names.
+                    const rowSelectors = [
+                        matchSelector,
+                        '[class*="event__match"]',
+                        '[id^="g_"]'
+                    ];
+
+                    const uniqueRows = new Map();
+                    for (const selector of rowSelectors) {
+                        const elements = document.querySelectorAll(selector);
+                        for (const el of elements) {
+                            const key = el.getAttribute('id') || el.innerText?.slice(0, 120) || `${selector}_${uniqueRows.size}`;
+                            if (!uniqueRows.has(key)) {
+                                uniqueRows.set(key, el);
+                            }
+                        }
                     }
 
-                    return Array.from(matchElements).map(match => {
+                    const team1Selectors = [
+                        homeTeamSelector,
+                        homeTeamAltSelector,
+                        '.event__participant--home .participant__name',
+                        '.event__homeParticipant [class*="participant"]'
+                    ];
+                    const team2Selectors = [
+                        awayTeamSelector,
+                        awayTeamAltSelector,
+                        '.event__participant--away .participant__name',
+                        '.event__awayParticipant [class*="participant"]'
+                    ];
+                    const timeSelectors = [
+                        timeSelector,
+                        '[class*="event__time"]'
+                    ];
+
+                    const pickText = (root, selectors) => {
+                        for (const selector of selectors) {
+                            if (!selector) continue;
+                            const text = root.querySelector(selector)?.innerText?.trim();
+                            if (text) return text;
+                        }
+                        return '';
+                    };
+
+                    return Array.from(uniqueRows.values()).map(match => {
                         // Extract team names
-                        let team1 = match.querySelector(homeTeamSelector)?.innerText.trim() || '';
-                        let team2 = match.querySelector(awayTeamSelector)?.innerText.trim() || '';
+                        let team1 = pickText(match, team1Selectors);
+                        let team2 = pickText(match, team2Selectors);
 
                         // Fallback: parse innerText
                         if (!team1 || !team2) {
@@ -90,7 +156,7 @@ async function scrapeMatches(urls) {
                             if (!team2 && nonTimeLines.length >= 2) team2 = nonTimeLines[1];
                         }
 
-                        const matchTimeRaw = match.querySelector(timeSelector)?.innerText.trim() || '';
+                        const matchTimeRaw = pickText(match, timeSelectors);
                         const matchIdAttr = match.getAttribute('id');
                         const matchText = match.innerText || '';
 
@@ -99,7 +165,8 @@ async function scrapeMatches(urls) {
                             team2,
                             matchTimeRaw,
                             matchIdAttr,
-                            matchText
+                            matchText,
+                            sourceUrl
                         };
                     });
                 }, { 
@@ -107,7 +174,10 @@ async function scrapeMatches(urls) {
                     matchSelector: CONFIG.selectors.matchRow,
                     homeTeamSelector: CONFIG.selectors.teams.home,
                     awayTeamSelector: CONFIG.selectors.teams.away,
-                    timeSelector: CONFIG.selectors.time
+                    homeTeamAltSelector: CONFIG.selectors.teams.homeAlt,
+                    awayTeamAltSelector: CONFIG.selectors.teams.awayAlt,
+                    timeSelector: CONFIG.selectors.time,
+                    sourceUrl: url
                 });
 
                 // Debug logging if no matches found
@@ -128,23 +198,49 @@ async function scrapeMatches(urls) {
                     const datetime = parseMatchDateTime(m.matchTimeRaw, new Date().getFullYear());
                     
                     let matchLink = '';
-                    if (m.matchIdAttr && m.matchIdAttr.startsWith('g_1_')) {
-                        const matchIdPart = m.matchIdAttr.replace('g_1_', '');
-                        matchLink = `https://www.flashscore.pt/jogo/${matchIdPart}/`;
+                    if (m.matchIdAttr && m.matchIdAttr.startsWith('g_')) {
+                        const parts = m.matchIdAttr.split('_');
+                        const matchIdPart = parts.length >= 3 ? parts.slice(2).join('_') : '';
+                        if (matchIdPart) {
+                            matchLink = `https://www.flashscore.pt/jogo/${matchIdPart}/`;
+                        }
                     }
 
+                    // Fallback: extract match id from text when present
+                    if (!matchLink) {
+                        const idFromText = (m.matchText || '').match(/\bg_\d+_([A-Za-z0-9]+)\b/);
+                        if (idFromText?.[1]) {
+                            matchLink = `https://www.flashscore.pt/jogo/${idFromText[1]}/`;
+                        }
+                    }
+
+                    const matchId = m.matchIdAttr || `${m.team1}_vs_${m.team2}_${datetime}`;
+                    const eventKey = buildEventKey({
+                        matchLink,
+                        sourceUrl: m.sourceUrl,
+                        matchId,
+                        team1: m.team1,
+                        team2: m.team2,
+                        datetime,
+                        matchTime: m.matchTimeRaw
+                    });
+
                     return {
-                        matchId: m.matchIdAttr || `${m.team1}_vs_${m.team2}_${datetime}`,
+                        matchId,
                         team1: m.team1,
                         team2: m.team2,
                         datetime,
                         matchLink,
-                        matchTime: m.matchTimeRaw
+                        matchTime: m.matchTimeRaw,
+                        sourceUrl: m.sourceUrl,
+                        eventKey
                     };
                 });
 
-                matchInfoList = matchInfoList.concat(processedMatches);
-                console.log(`✓ Found ${processedMatches.length} matches`);
+                const filteredMatches = processedMatches.filter(m => m.team1 && m.team2);
+
+                matchInfoList = matchInfoList.concat(filteredMatches);
+                console.log(`✓ Found ${filteredMatches.length} matches`);
             } catch (error) {
                 console.error(`Error parsing matches on ${url}:`, error.message);
                 continue;
@@ -261,14 +357,14 @@ async function addEventsToCalendar(upcomingMatches) {
     const service = google.calendar({ version: 'v3', auth });
 
     // Build match map for quick lookup
-    const matchMap = new Map(upcomingMatches.map(m => [m.matchLink, m]));
+    const matchMap = new Map(upcomingMatches.map(m => [m.eventKey || buildEventKey(m), m]));
     const now = new Date();
 
     console.log('\n--- Managing existing events ---');
 
     // Check for missing events and manage deletion threshold
-    for (const [matchLink, eventId] of Object.entries(eventIds)) {
-        const match = matchMap.get(matchLink);
+    for (const [eventKey, eventId] of Object.entries(eventIds)) {
+        const match = matchMap.get(eventKey);
 
         // Delete if match date has passed
         if (match && match.datetime) {
@@ -280,32 +376,32 @@ async function addEventsToCalendar(upcomingMatches) {
                 } catch (error) {
                     console.error(`Error deleting event: ${error.message}`);
                 }
-                delete eventIds[matchLink];
-                delete meta.missingCounts[matchLink];
+                delete eventIds[eventKey];
+                delete meta.missingCounts[eventKey];
                 continue;
             }
         }
 
         // Manage missing events
         if (!match) {
-            meta.missingCounts[matchLink] = (meta.missingCounts[matchLink] || 0) + 1;
-            console.log(`⚠ Match missing (count: ${meta.missingCounts[matchLink]}): ${matchLink}`);
+            meta.missingCounts[eventKey] = (meta.missingCounts[eventKey] || 0) + 1;
+            console.log(`⚠ Match missing (count: ${meta.missingCounts[eventKey]}): ${eventKey}`);
 
-            if (meta.missingCounts[matchLink] >= CONFIG.missingEventThreshold) {
+            if (meta.missingCounts[eventKey] >= CONFIG.missingEventThreshold) {
                 try {
                     await service.events.delete({ calendarId: CONFIG.calendarId, eventId });
                     console.log(`✓ Deleted missing event (${CONFIG.missingEventThreshold} runs): ${eventId}`);
                 } catch (error) {
                     console.error(`Error deleting event: ${error.message}`);
                 }
-                delete eventIds[matchLink];
-                delete meta.missingCounts[matchLink];
+                delete eventIds[eventKey];
+                delete meta.missingCounts[eventKey];
             }
         } else {
             // Reset missing count if match reappeared
-            if (meta.missingCounts[matchLink]) {
-                console.log(`✓ Match reappeared: ${matchLink}`);
-                delete meta.missingCounts[matchLink];
+            if (meta.missingCounts[eventKey]) {
+                console.log(`✓ Match reappeared: ${eventKey}`);
+                delete meta.missingCounts[eventKey];
             }
         }
     }
@@ -316,6 +412,8 @@ async function addEventsToCalendar(upcomingMatches) {
 
     // Add or update events
     for (const match of upcomingMatches) {
+        const eventKey = match.eventKey || buildEventKey(match);
+
         // Skip invalid datetimes
         if (!match.datetime || isNaN(new Date(match.datetime).getTime())) {
             console.warn(`⚠ Skipping invalid match: ${match.team1} vs ${match.team2} (${match.matchTime})`);
@@ -336,12 +434,12 @@ async function addEventsToCalendar(upcomingMatches) {
             },
         };
 
-        if (eventIds[match.matchLink]) {
+        if (eventIds[eventKey]) {
             // Update existing event
             try {
                 await service.events.update({
                     calendarId: CONFIG.calendarId,
-                    eventId: eventIds[match.matchLink],
+                    eventId: eventIds[eventKey],
                     requestBody: eventData,
                 });
                 console.log(`✓ Updated: ${eventData.summary}`);
@@ -355,7 +453,7 @@ async function addEventsToCalendar(upcomingMatches) {
                     calendarId: CONFIG.calendarId,
                     requestBody: eventData,
                 });
-                eventIds[match.matchLink] = result.data.id;
+                eventIds[eventKey] = result.data.id;
                 console.log(`✓ Created: ${eventData.summary}`);
             } catch (error) {
                 console.error(`Error creating event: ${error.message}`);
